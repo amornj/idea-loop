@@ -1,0 +1,123 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import process from 'node:process';
+import { execFileSync, spawnSync } from 'node:child_process';
+
+const MODES = new Set(['paper', 'framework', 'build', 'teach', 'strategy']);
+const MODEL_ALIASES = {
+  opus: 'anthropic/claude-opus-4-6',
+  'sonnet-4.6': 'anthropic/claude-sonnet-4-6',
+  'gpt-5.4': 'openai-codex/gpt-5.4',
+  'gpt-5.4-mini': 'openai-codex/gpt-5.4-mini',
+  'gemini-3.1-pro-preview': 'google/gemini-3.1-pro-preview',
+  'gemini-3.1-pro': 'google/gemini-3.1-pro-preview',
+  'gemini-2.5-pro': 'google/gemini-2.5-pro',
+  'gemini-2.5-flash': 'google/gemini-2.5-flash',
+  'gemini-3.1-flash-lite': 'google/gemini-3.1-flash-lite',
+  'minimax-m2.7': 'minimax-portal/MiniMax-M2.7',
+};
+const MODEL_HELP = Object.keys(MODEL_ALIASES).join(', ');
+const DEFAULTS = {
+  format: 'markdown', loops: 2, strict: false, fast: false, minimal: false,
+  foolproof: false, confidence: false, mondayMorning: false, obsidian: false,
+  useModel: true, model: 'gemini-3.1-pro-preview', defaultMode: null,
+  obsidianPath: '/Users/home/projects/obsidian/journal',
+};
+const MODE_SCHEMAS = {
+  paper: { title: 'Idea Loop — Paper Mode', sections: ['Paper in One Sentence','What Question It Really Answers','Feynman Model','Socratic Pressure Test','What Is Signal vs Noise','What Changes in My Practice','What Does NOT Change in My Practice','Monday-Morning Practice Change','Confidence Level','Best Next Step'] },
+  framework: { title: 'Idea Loop — Framework Mode', sections: ['Problem in One Sentence','What This Framework Must Decide','Feynman Model','Socratic Pressure Test','Subtraction Pass','Minimal Framework','Robust Framework','What I Would Actually Use at the Bedside / In Practice','Best Next Step'] },
+  build: { title: 'Idea Loop — Build Mode', sections: ['Raw Idea','What User Problem Is This Actually Solving?','Feynman Model','Socratic Pressure Test','Subtraction Pass','Minimal Viable Version','Stronger Version','What I Would Not Build Yet','Best Next Prototype'] },
+  teach: { title: 'Idea Loop — Teach Mode', sections: ['Topic in One Sentence','What the Audience Actually Needs to Understand','Feynman Model','Socratic Pressure Test','Subtraction Pass','Clean Teaching Structure','Slide / Section Order','Three Durable Takeaways','Best Next Step'] },
+  strategy: { title: 'Idea Loop — Strategy Mode', sections: ['Raw Situation','What Problem Are You Actually Trying to Solve?','Feynman Model','Socratic Pressure Test','Subtraction Pass','Minimal Operating Plan','Stronger / More Robust Plan','What Not to Do','Clearest Next Move'] },
+};
+
+function printHelp() {
+  console.log(`idea-loop v0.6.0\n\nUsage:\n  idea-loop <mode> [input]\n  idea-loop [input]\n\nModes:\n  paper | framework | build | teach | strategy\n\nInputs:\n  --file <path>         Read input from file\n  --stdin               Read input from stdin\n  --pdf <path>          Extract text from PDF\n  --url <url>           Use URL as source (YouTube-aware)\n  --URL <url>           Same as --url\n\nFlags:\n  --output <path>       Write result to file\n  --format <fmt>        markdown | json | text\n  --loops <n>           Max loop count\n  --strict              More aggressive pressure test\n  --fast                Lighter / faster pass\n  --minimal             Stronger subtraction bias\n  --foolproof           Bias toward robust rebuild\n  --confidence          Include confidence note\n  --monday-morning      Bias toward practical action\n  --obsidian            Save to configured Obsidian path\n  --title <text>        Override title\n  --use-model           Use model-backed generation\n  --no-model            Disable model-backed generation\n  --model <name>        Model alias or full provider/model\n  --list-models         Show suggested model names\n  --reader              Create PDF and email it to Readwise Reader\n  --help                Show help\n\nSuggested models:\n  ${MODEL_HELP}\n`);
+}
+function parseSimpleYaml(text) { const obj = {}; for (const rawLine of text.split(/\r?\n/)) { const line = rawLine.trim(); if (!line || line.startsWith('#')) continue; const idx = line.indexOf(':'); if (idx === -1) continue; const key = line.slice(0, idx).trim(); let value = line.slice(idx + 1).trim(); if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1); if (value === 'true') value = true; else if (value === 'false') value = false; else if (/^-?\d+$/.test(value)) value = Number(value); obj[key] = value; } return obj; }
+function loadConfig() { const configPath = path.join(process.env.HOME || '/Users/home', '.idea-loop', 'config.yaml'); if (!fs.existsSync(configPath)) return {}; try { return parseSimpleYaml(fs.readFileSync(configPath, 'utf8')); } catch { return {}; } }
+function buildDefaults(config) { return { ...DEFAULTS, format: config.default_format ?? DEFAULTS.format, loops: config.default_loops ?? DEFAULTS.loops, strict: config.strict_by_default ?? DEFAULTS.strict, confidence: config.include_confidence ?? DEFAULTS.confidence, model: config.default_model ?? DEFAULTS.model, useModel: config.use_model_by_default ?? DEFAULTS.useModel, defaultMode: config.default_mode ?? DEFAULTS.defaultMode, obsidianPath: config.obsidian_path ?? DEFAULTS.obsidianPath }; }
+function resolveModel(model) { return MODEL_ALIASES[model] || model; }
+function parseArgs(argv, defaults) {
+  const args = [...argv]; const opts = { ...defaults, positional: [] };
+  while (args.length) {
+    const token = args.shift(); if (!token) continue;
+    if (token === '--help' || token === '-h') { opts.help = true; continue; }
+    if (token === '--list-models') { opts.listModels = true; continue; }
+    if (token === '--reader') { opts.reader = true; continue; }
+    if (token === '--strict') { opts.strict = true; continue; }
+    if (token === '--fast') { opts.fast = true; continue; }
+    if (token === '--minimal') { opts.minimal = true; continue; }
+    if (token === '--foolproof') { opts.foolproof = true; continue; }
+    if (token === '--confidence') { opts.confidence = true; continue; }
+    if (token === '--monday-morning') { opts.mondayMorning = true; continue; }
+    if (token === '--obsidian') { opts.obsidian = true; continue; }
+    if (token === '--stdin') { opts.stdin = true; continue; }
+    if (token === '--json') { opts.format = 'json'; continue; }
+    if (token === '--use-model') { opts.useModel = true; continue; }
+    if (token === '--no-model') { opts.useModel = false; continue; }
+    const nextValue = () => { const value = args.shift(); if (!value) throw new Error(`Missing value for ${token}`); return value; };
+    if (token === '--file') { opts.file = nextValue(); continue; }
+    if (token === '--pdf') { opts.pdf = nextValue(); continue; }
+    if (token === '--url' || token === '--URL') { opts.url = nextValue(); continue; }
+    if (token === '--output') { opts.output = nextValue(); continue; }
+    if (token === '--format') { opts.format = nextValue(); continue; }
+    if (token === '--loops') { opts.loops = Number(nextValue()); continue; }
+    if (token === '--title') { opts.title = nextValue(); continue; }
+    if (token === '--model') { opts.model = nextValue(); continue; }
+    opts.positional.push(token);
+  }
+  if (opts.positional.length && MODES.has(opts.positional[0])) opts.mode = opts.positional.shift();
+  opts.inlineInput = opts.positional.join(' ').trim();
+  if (!opts.url && /^https?:\/\//.test(opts.inlineInput)) { opts.url = opts.inlineInput; opts.inlineInput = ''; }
+  return opts;
+}
+function detectMode(text, fallbackMode = null) { const t = text.toLowerCase(); if (/\[youtube source\]|youtube\.com|youtu\.be/.test(t)) return 'teach'; if (/paper|trial|guideline|practice|monday/.test(t)) return 'paper'; if (/framework|algorithm|pathway|decision|escalation/.test(t)) return 'framework'; if (/build|app|tool|feature|workflow|product|mvp/.test(t)) return 'build'; if (/teach|talk|lecture|slides|explain|journal club|youtube|video/.test(t)) return 'teach'; return fallbackMode || 'strategy'; }
+async function readStdin() { return await new Promise((resolve, reject) => { let data = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => data += chunk); process.stdin.on('end', () => resolve(data.trim())); process.stdin.on('error', reject); }); }
+function extractPdfText(pdfPath) { try { return execFileSync('pdftotext', [pdfPath, '-'], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 }); } catch (error) { return `[PDF SOURCE]\n${pdfPath}\n\nPDF extraction failed: ${error instanceof Error ? error.message : String(error)}`; } }
+function isYouTubeUrl(url) { return /youtube\.com|youtu\.be/.test(url); }
+function cleanVtt(vttText) { const lines = vttText.split(/\r?\n/); const out = []; const seen = new Set(); for (let line of lines) { line = line.trim(); if (!line || line.startsWith('WEBVTT') || line.startsWith('Kind:') || line.startsWith('Language:') || line.includes('-->')) continue; line = line.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim(); if (!line || seen.has(line)) continue; seen.add(line); out.push(line); } return out.join('\n'); }
+function loadYouTubeInput(url) { const ytDlp = '/Library/Frameworks/Python.framework/Versions/3.13/bin/yt-dlp'; const ytArgsBase = ['--js-runtimes', 'node']; const tmpBase = path.join('/tmp', `idea-loop-${Date.now()}`); try { const metaJson = execFileSync(ytDlp, [...ytArgsBase, '--dump-json', '--skip-download', url], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }); const meta = JSON.parse(metaJson); execFileSync(ytDlp, [...ytArgsBase, '--write-auto-sub', '--sub-lang', 'en', '--skip-download', '--sub-format', 'vtt', '-o', tmpBase, url], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }); const vttPath = `${tmpBase}.en.vtt`; let transcript = ''; if (fs.existsSync(vttPath)) transcript = cleanVtt(fs.readFileSync(vttPath, 'utf8')); return { text: `[YOUTUBE SOURCE]\nTitle: ${meta.title || ''}\nChannel: ${meta.channel || ''}\nDuration: ${meta.duration_string || meta.duration || ''}\nURL: ${url}\n\nDescription:\n${(meta.description || '').slice(0, 4000)}\n\nTranscript:\n${transcript.slice(0, 20000)}`, meta }; } catch (error) { return { text: `[YOUTUBE SOURCE]\nURL: ${url}\n\nYouTube extraction failed: ${error instanceof Error ? error.message : String(error)}`, meta: null }; } }
+function loadGenericUrl(url) { return { text: `[URL SOURCE]\n${url}`, meta: null }; }
+async function loadInput(opts) { if (opts.stdin) return { text: await readStdin(), sourceType: 'stdin', meta: null }; if (opts.file) return { text: fs.readFileSync(opts.file, 'utf8'), sourceType: 'file', meta: null }; if (opts.pdf) return { text: extractPdfText(opts.pdf), sourceType: 'pdf', meta: null }; if (opts.url) { if (isYouTubeUrl(opts.url)) { const yt = loadYouTubeInput(opts.url); return { text: yt.text, sourceType: 'youtube', meta: yt.meta }; } const generic = loadGenericUrl(opts.url); return { text: generic.text, sourceType: 'url', meta: null }; } return { text: opts.inlineInput || '', sourceType: 'inline', meta: null }; }
+function buildPrompt(mode, input, opts) {
+  const schema = MODE_SCHEMAS[mode];
+  const flags = [opts.strict ? 'strict pressure test' : null, opts.fast ? 'fast mode' : null, opts.minimal ? 'aggressive subtraction' : null, opts.foolproof ? 'foolproof rebuild bias' : null, opts.mondayMorning ? 'monday-morning practical emphasis' : null].filter(Boolean).join(', ');
+  const youtubeSpecific = opts.sourceType === 'youtube' ? `The source is a YouTube video. Do NOT just summarize the transcript. Extract the creator's claims, separate fact from interpretation, identify hidden assumptions, note where verification is weak, and challenge the logic. For strategy mode on YouTube, explicitly include these sections inside your answer: Core claim; What is factual vs interpretive; Hidden assumptions; Weakest link; What survives subtraction; What I would actually believe; What needs external verification.` : '';
+  const criticalThinking = `Run the loop as an actual critical-thinking machine:\n- Feynman = explain the topic simply and accurately\n- Socrates / grill-me = question assumptions, weak inferences, hidden leaps, and missing evidence\n- Subtraction = remove parts that are not necessary for the conclusion to stand\n- Auto-research loop = if a section is still vague or contradicted, tighten it before moving on`;
+  return `You are running idea-loop in ${mode} mode.\n\n${criticalThinking}\n\nFollow this sequence:\n1. Clarify the real problem.\n2. Build a Feynman model.\n3. Pressure-test assumptions in Socratic style.\n4. Run a subtraction pass.\n5. Rebuild a better output.\n6. Be specific and practical.\n\n${youtubeSpecific}\n\nUse this output schema:\n${schema.sections.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nReturn markdown only.\n${flags ? `Special flags: ${flags}.` : ''}\n\nSource input:\n${input.slice(0, 18000)}`;
+}
+function callExternalModel(prompt, opts) {
+  const model = resolveModel(opts.model);
+  // safer fallback chain: acpx -> claude local -> scaffold
+  const attempts = [
+    () => spawnSync('acpx', ['exec', '--model', model], { input: prompt, encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 }),
+    () => model.startsWith('anthropic/') || opts.model.includes('opus') || opts.model.includes('sonnet')
+      ? spawnSync('claude', ['--print', '--permission-mode', 'bypassPermissions'], { input: prompt, encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 })
+      : null,
+    () => spawnSync('gemini', ['-p', prompt], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 }),
+  ];
+  for (const run of attempts) {
+    const res = run();
+    if (!res) continue;
+    if (res.status === 0 && res.stdout?.trim()) return res.stdout.trim();
+  }
+  return null;
+}
+function maybeRunModel(mode, input, opts) { if (!opts.useModel) return null; const prompt = buildPrompt(mode, input, opts); const out = callExternalModel(prompt, opts); if (out) return out; return `# Idea Loop — Model Call Failed\n\nModel call failed for ${resolveModel(opts.model)} using the fallback chain (acpx -> claude -> gemini).\n\nFalling back to scaffold output is recommended.`; }
+function runIdeaLoop(mode, input, opts) { const title = opts.title || `Idea Loop - ${mode[0].toUpperCase()}${mode.slice(1)} Mode`; const modeled = maybeRunModel(mode, input, opts); if (modeled) return { mode, title, input, rendered: modeled, loop_count: Math.max(1, opts.loops || 2), source: 'model' }; const realProblem = inferRealProblem(mode, input); const feynman = buildFeynman(mode, input); const pressure = buildPressureTest(mode, opts); const subtraction = buildSubtraction(mode, opts); const rebuild = buildRebuild(mode, input, opts); const nextStep = buildNextStep(mode, opts); return { mode, title, input, sections: { raw_input: input, real_problem: realProblem, feynman_model: feynman, pressure_test: pressure, subtraction_pass: subtraction, rebuilt_output: rebuild, best_next_step: nextStep, confidence: opts.confidence ? 'medium - scaffold logic without external model' : undefined }, loop_count: Math.max(1, opts.loops || 2), source: 'scaffold' }; }
+function inferRealProblem(mode, input) { const base = input || 'No input provided.'; switch (mode) { case 'paper': return `Translate the paper into an actual practice implication. Source: ${base.slice(0, 180)}`; case 'framework': return `Turn a complex decision space into a usable decision structure. Source: ${base.slice(0, 180)}`; case 'build': return `Clarify what user problem is being solved and what the smallest viable version is. Source: ${base.slice(0, 180)}`; case 'teach': return `Convert a topic into a structure that another human can understand and retain. Source: ${base.slice(0, 180)}`; default: return `Clarify the real bottleneck and reduce ambiguity into an actionable plan. Source: ${base.slice(0, 180)}`; } }
+function buildFeynman(mode, input) { return `Explain the domain simply for ${mode} mode, identify what is standard, what is novel, and what constraints reality imposes.\n\nSource excerpt: ${input.slice(0, 400)}`; }
+function buildPressureTest(mode, opts) { const generic = { strengths: [`Potentially useful for ${mode} mode if the input is real and specific.`], weaknesses: [`No model-backed reasoning was used; this is scaffold logic only.`], assumptions: [`The user's stated goal is the real goal.`, opts.strict ? `Strict mode: assume hidden constraints and challenge them aggressively.` : `Default mode: challenge only the most obvious assumptions.`], failure_modes: [`Input may be too vague.`, `The output may optimize elegance instead of usefulness.`] }; if (mode === 'paper') { generic.assumptions.push('The source is externally valid enough to matter in practice.'); generic.failure_modes.push('Association may be mistaken for protocol-changing evidence.'); } if (mode === 'build') generic.failure_modes.push('The idea may solve an interesting problem that users do not actually care enough about.'); if (mode === 'strategy') generic.failure_modes.push('Creator claims may be interpretive and need external verification before belief.'); return generic; }
+function buildSubtraction(mode, opts) { const items = ['Remove decorative complexity.', 'Keep only components that directly solve the stated problem.', 'Delay optional features until the core version works.']; if (mode === 'paper') items.push('Separate reasoning change from protocol change.'); if (mode === 'teach') items.push('Remove trivia that does not improve retention.'); if (mode === 'strategy') items.push('Keep only claims that still stand after assumptions are challenged.'); if (opts.minimal) items.unshift('Aggressively minimize moving parts and dependencies.'); return items; }
+function buildRebuild(mode, input, opts) { const bias = opts.foolproof ? 'robust / foolproof' : 'minimal useful'; const modeSpecific = { paper: 'Produce a conservative practice-facing interpretation.', framework: 'Produce a clean decision structure with minimal branch points.', build: 'Produce an MVP and a stronger version, and name what not to build yet.', teach: 'Produce a clean teaching structure with durable takeaways.', strategy: 'Produce a minimal operating plan and a clearer next move.' }; return `Produce a ${bias} ${mode} output with explicit next-step guidance. ${modeSpecific[mode]}\n\nInput: ${input.slice(0, 280)}`; }
+function buildNextStep(mode, opts) { if (opts.mondayMorning && mode === 'paper') return 'State the Monday-morning practice change clearly and conservatively.'; return `Turn this ${mode} analysis into a concrete action, note, or prototype.`; }
+function scaffoldMarkdown(result) { const s = result.sections; const schema = MODE_SCHEMAS[result.mode]; const sectionMap = { paper: [s.raw_input || '', s.real_problem, s.feynman_model, formatPressureTest(s.pressure_test), formatSignalVsNoise(), s.rebuilt_output, 'No broad protocol change should be assumed from scaffold-only reasoning.', s.best_next_step, s.confidence || 'medium', s.best_next_step], framework: [s.real_problem, 'Identify the minimum useful decisions this framework must make.', s.feynman_model, formatPressureTest(s.pressure_test), (s.subtraction_pass || []).map(x => `- ${x}`).join('\n'), 'Minimal framework: TODO expand with model-backed reasoning.', s.rebuilt_output, 'Use the simplified framework first; only add complexity if it changes action.', s.best_next_step], build: [s.raw_input || '', s.real_problem, s.feynman_model, formatPressureTest(s.pressure_test), (s.subtraction_pass || []).map(x => `- ${x}`).join('\n'), 'Minimal viable version: TODO expand with model-backed reasoning.', s.rebuilt_output, 'Do not build the optional parts yet.', s.best_next_step], teach: [s.real_problem, 'Identify what the audience actually needs to retain.', s.feynman_model, formatPressureTest(s.pressure_test), (s.subtraction_pass || []).map(x => `- ${x}`).join('\n'), 'Clean teaching structure: TODO expand with model-backed reasoning.', 'Slide / section order: start with the simplest framing first.', 'Three durable takeaways: TODO expand.', s.best_nextStep], strategy: [s.raw_input || '', s.real_problem, s.feynman_model, formatPressureTest(s.pressure_test), (s.subtraction_pass || []).map(x => `- ${x}`).join('\n'), 'Minimal operating plan: TODO expand with model-backed reasoning.', s.rebuilt_output, 'What not to do: avoid adding complexity before the bottleneck is proven.', s.best_next_step] }; const values = sectionMap[result.mode]; return `# ${result.title}\n\n${schema.sections.map((heading, i) => `## ${i + 1}. ${heading}\n${values?.[i] || ''}`).join('\n\n')}\n`; }
+function formatPressureTest(pressure) { return `### Strengths\n${(pressure.strengths || []).map(x => `- ${x}`).join('\n')}\n\n### Weaknesses\n${(pressure.weaknesses || []).map(x => `- ${x}`).join('\n')}\n\n### Assumptions\n${(pressure.assumptions || []).map(x => `- ${x}`).join('\n')}\n\n### Failure Modes\n${(pressure.failure_modes || []).map(x => `- ${x}`).join('\n')}`; }
+function formatSignalVsNoise() { return `### Signal\n- TODO expand with model-backed reasoning or manual refinement.\n\n### Noise\n- Avoid over-reading unvalidated details.`; }
+function formatResult(result, format) { if (format === 'json') return JSON.stringify(result, null, 2); if (result.rendered && (format === 'markdown' || format === 'text')) return result.rendered; if (format === 'text') return `${result.title}\n\nMode: ${result.mode}\nNext: ${result.sections.best_next_step}`; return scaffoldMarkdown(result); }
+function maybeSaveObsidian(rendered, opts, result) { if (!opts.obsidian) return null; const obsidianPath = opts.obsidianPath || DEFAULTS.obsidianPath; fs.mkdirSync(obsidianPath, { recursive: true }); const safeName = (result.title || 'Idea Loop').replace(/[\\/:*?"<>|]/g, '-'); const outPath = path.join(obsidianPath, `${safeName}.md`); fs.writeFileSync(outPath, rendered, 'utf8'); return outPath; }
+function maybeSendReader(rendered, opts, result) { if (!opts.reader) return null; const tmpDir = '/tmp'; const safeName = (result.title || 'Idea Loop').replace(/[\\/:*?"<>|]/g, '-'); const mdPath = path.join(tmpDir, `${safeName}.md`); const pdfPath = path.join(tmpDir, `${safeName}.pdf`); fs.writeFileSync(mdPath, rendered, 'utf8'); try { execFileSync('python3', ['/Users/home/.openclaw/workspace/md_to_pdf.py', mdPath, pdfPath], { stdio: ['ignore', 'pipe', 'pipe'] }); execFileSync('gog', ['gmail', 'send', '--account', 'amornj@gmail.com', '--to', 'amornj@library.readwise.io', '--subject', result.title || 'Idea Loop Output', '--body-file', '-', '--attach', pdfPath], { input: `Sending idea-loop output PDF for Reader import.\n\nTitle: ${result.title || 'Idea Loop Output'}\n`, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }); return pdfPath; } catch (e) { return `Reader send failed: ${e instanceof Error ? e.message : String(e)}`; } }
+async function main() { const config = loadConfig(); const defaults = buildDefaults(config); const opts = parseArgs(process.argv.slice(2), defaults); if (opts.help) return printHelp(); if (opts.listModels) { console.log('Available model aliases:'); for (const [alias, full] of Object.entries(MODEL_ALIASES)) console.log(`- ${alias} -> ${full}`); return; } const loaded = await loadInput(opts); const input = loaded.text; if (!input) { printHelp(); process.exitCode = 1; return; } opts.sourceType = loaded.sourceType; const mode = opts.mode || detectMode(input, opts.defaultMode); if (loaded.sourceType === 'youtube' && !opts.fast && opts.useModel !== false) opts.useModel = true; if (!opts.output) { const sourceLabel = loaded.sourceType === 'youtube' ? 'YouTube' : loaded.sourceType.toUpperCase(); console.error(`Detected source: ${sourceLabel}`); console.error(`Detected mode: ${mode}`); if (opts.useModel) console.error(`Reasoning engine: model-backed (${resolveModel(opts.model)})`); } const result = runIdeaLoop(mode, input, opts); const rendered = formatResult(result, opts.format); if (opts.output) fs.writeFileSync(opts.output, rendered, 'utf8'); const obsidianPath = maybeSaveObsidian(rendered, opts, result); if (!opts.output) console.log(rendered); if (obsidianPath) console.error(`Saved note: ${obsidianPath}`); }
+main().catch(err => { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); });
