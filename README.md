@@ -86,7 +86,7 @@ Current default:
 The `--reader` flag converts the output to PDF and emails it to:
 
 ```text
-amornj@library.readwise.io
+your-email@library.readwise.io
 ```
 
 ## Config
