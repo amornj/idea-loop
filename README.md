@@ -1,6 +1,6 @@
 # idea-loop
 
-A CLI for turning vague, overcomplicated, or overconfident ideas into clearer, simpler, and more actionable outputs through a structured **research → critique → subtraction → rebuild** loop.
+A CLI for turning vague, overcomplicated, or overconfident ideas into clearer, simpler, and more actionable outputs through a structured **feynman → socrates → chomsky → musk subtraction → rebuild** loop.
 
 ## Modes
 - `paper` — paper to practice
@@ -88,6 +88,17 @@ The `--reader` flag converts the output to PDF and emails it to:
 ```text
 your-email@library.readwise.io
 ```
+
+## Thinking Loop
+The current reasoning sequence is:
+
+1. `Feynman` — simplify until the idea can be explained cleanly
+2. `Socrates` — pressure-test assumptions, contradictions, and weak inferences
+3. `Chomsky` — map the hidden system, incentives, defaults, and power structure
+4. `Musk` — remove assumptions and inherited conventions that do not survive first-principles scrutiny
+5. rebuild into a more useful output
+
+In the rendered output, this appears as a dedicated `Chomsky Structural Analysis` step followed by a `Musk Subtraction Test`.
 
 ## Config
 Config file:
